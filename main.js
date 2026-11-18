@@ -1,62 +1,27 @@
-import {gcmsiv} from '@noble/ciphers'
-import {argon2id} from '@noble/hashes/argon2'
-import { Database } from 'node:sqlite'
+import { Ledger } from './src/ledger.js';
+import { parseFingerprintKey } from './src/crypto.js';
+import { createHttpServer } from './src/server.js';
 
-
-const express = require('express')
-const app = express()
-const port = 1000
-const nonceLength = 12
-const nonce = crypto.getRandomValues(new Uint8Array(nonceLength))
-const db = new Database('transactions.db')
-initDatabase()
-
-app.listen(port, () => {
-  console.log(`transaction handler running on port ${port}`)
-  console.log(`protecting your shekels since 2026 with aes-256-gcm-siv and argon2id`)
-})
-
-async function initDatabase() {
-  await db.exec (`CREATE TABLE IF NOT EXISTS transactions (transactionid INTEGER PRIMARY KEY AUTOINCREMENT, ciphertext BLOB)`)
+const port = Number(process.env.PORT ?? 1000);
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error('PORT must be an integer between 1 and 65535');
 }
+const host = process.env.HOST ?? '127.0.0.1';
+const fingerprintKey = parseFingerprintKey(process.env.SHEKELS_FINGERPRINT_KEY);
+const apiToken = process.env.SHEKELS_API_TOKEN;
+const adminToken = process.env.SHEKELS_ADMIN_TOKEN;
+const ledger = new Ledger({
+  path: process.env.SHEKELS_DB_PATH ?? './shekels.sqlite',
+  fingerprintKey,
+});
+const server = createHttpServer({ ledger, apiToken, adminToken });
+server.listen(port, host, () => console.log(`Shekels listening on http://${host}:${port}`));
 
-async function deriveKey(password, salt) {
-  const key = await argon2id(password, salt, {mem: 65536, time: 3, parallelism: 1, hashLength: 32})
-  return key
+function shutdown() {
+  server.close(() => {
+    ledger.close();
+    process.exitCode = 0;
+  });
 }
-
-async function encrypt(plaintext, key) {
-  const cipher = await gcmsiv(key, nonce)
-  const ciphertext = await cipher.encrypt(plaintext)
-  return {ciphertext}
-}
-
-async function decrypt(ciphertext, key) {
-  const cipher = await gcmsiv(key, nonce)
-  const plaintext = await cipher.decrypt(ciphertext)
-  return plaintext
-}
-
-async function storeTransaction(transactionid, ciphertext) {
-  const stmt = await db.prepare('INSERT INTO transactions (id, ciphertext) VALUES (?, ?)')
-  await stmt.run(transactionid, ciphertext)
-  await stmt.finalize()
-}
-
-async function retrieveTransaction(transactionid) {
-  const stmt = await db.prepare('SELECT ciphertext FROM transactions WHERE id = ?')
-  const row = await stmt.get(transactionid)
-  await stmt.finalize()
-  return row ? row.ciphertext : null
-}
-
-async function rawsql(cmd, masterkey) {
-    if (masterkey === process.env.MASTERKEY) {
-        const stmt = await db.prepare(cmd)
-        await stmt.finalize()
-    }
-    else {
-        throw new Error('Invalid master key')
-        throw new Error('Attempted to execute raw SQL command without valid master key')
-    }
-}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
